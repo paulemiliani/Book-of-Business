@@ -194,7 +194,7 @@
   .account-card:hover{transform:translateY(-2px);box-shadow:var(--shadow);border-color:var(--line-strong);}
   .account-card-top{display:flex;justify-content:space-between;align-items:flex-start;gap:8px;}
   .account-name{font-family:var(--font-display);font-weight:600;font-size:16px;line-height:1.25;}
-  .health-dot{width:10px;height:10px;border-radius:50%;flex-shrink:0;margin-top:4px;}
+  .health-dot{width:10px;height:10px;border-radius:50%;flex-shrink:0;margin-top:4px;background:var(--line-strong);}
   .health-dot.good{background:var(--good);}
   .health-dot.mod{background:var(--mod);}
   .health-dot.risk{background:var(--risk);}
@@ -502,7 +502,7 @@ function newAccount(name){
   return {
     id: uid(),
     name: name || 'New Account',
-    health: 'good',
+    health: '',
     experience: 'Standalone',
     pms: [{name:'', practices:0}],
     imaging: [{name:'', practices:0}],
@@ -697,7 +697,7 @@ function badgeClass(phase){
     'Commercial':'badge-commercial','Dropped':'badge-dropped'
   }[phase] || 'badge-pilot';
 }
-function healthLabel(h){ return {good:'Healthy', mod:'Moderate', risk:'At Risk'}[h] || 'Healthy'; }
+function healthLabel(h){ return {good:'Healthy', mod:'Moderate', risk:'At Risk'}[h] || 'Not Set'; }
 
 function icon(name){
   const icons = {
@@ -1289,7 +1289,7 @@ function renderDetail(){
       <!-- LEFT: sticky summary -->
       <div class="sticky">
         <div class="panel">
-          <div class="panel-title">Account Health</div>
+          <div class="panel-title">Account Health <span style="font-weight:500;color:var(--ink-faint);text-transform:none;font-size:11.5px;">(optional)</span></div>
           <div class="pill-group">
             <button class="pill health-good ${a.health==='good'?'selected':''}" data-health="good">Healthy</button>
             <button class="pill health-mod ${a.health==='mod'?'selected':''}" data-health="mod">Moderate</button>
@@ -1556,9 +1556,11 @@ function bindDetailEvents(a){
 
   document.getElementById('acc-name').onchange = (e) => updateAccount(acc => acc.name = e.target.value.trim() || 'Untitled account');
 
-  // Health
+  // Health (optional — clicking the already-selected option clears it)
   document.querySelectorAll('[data-health]').forEach(btn => {
-    btn.onclick = () => updateAccount(acc => acc.health = btn.dataset.health);
+    btn.onclick = () => updateAccount(acc => {
+      acc.health = acc.health === btn.dataset.health ? '' : btn.dataset.health;
+    });
   });
   // Segment
   document.querySelectorAll('[data-segment]').forEach(btn => {
