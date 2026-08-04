@@ -61,14 +61,6 @@
     padding:14px 28px;
     display:flex;align-items:center;gap:16px;
   }
-  .storage-warning{
-    position:sticky;top:57px;z-index:19;
-    background:var(--risk);color:#fff;
-    font-size:13px;font-weight:600;
-    padding:10px 28px;
-    display:flex;align-items:center;gap:10px;
-  }
-  .storage-warning svg{flex-shrink:0;}
   .brand{
     display:flex;align-items:center;gap:12px;
     white-space:nowrap;
@@ -434,8 +426,6 @@
   <div class="header-actions" id="header-actions"></div>
 </div>
 
-<div id="storage-warning" class="storage-warning hidden"></div>
-
 <div class="main">
   <div id="overview-view"></div>
   <div id="detail-view" class="hidden"></div>
@@ -457,76 +447,43 @@ const SEGMENTS = [
 ];
 const DAYS = ['Mon','Tue','Wed','Thu','Fri'];
 
-// Data lives in Claude's built-in artifact storage (personal, not shared),
-// so it persists across sessions without needing an external host.
-// NOTE: this only treats a failed read as "no key yet" — it does not swallow
-// JSON parse errors on existing data, since that would risk mistaking corrupted-but-present
-// data for an empty account list (see boot(), which gates saving on a trustworthy load).
+// GITHUB / SELF-HOSTED VERSION — uses the browser's own localStorage instead of
+// Claude's window.storage, since window.storage only exists inside Claude's artifact
+// environment. Data here lives in THIS browser, on THIS device, for THIS domain.
 async function loadState(){
-  let result;
   try{
-    result = await window.storage.get(STORAGE_KEY, false);
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if(!raw) return { accounts: [] };
+    const parsed = JSON.parse(raw);
+    if(Array.isArray(parsed.accounts)) parsed.accounts.forEach(normalizeAccount);
+    return parsed;
   }catch(e){
-    // Non-existent keys throw on this API — this is the expected path for a
-    // brand-new install that has never saved anything yet.
+    console.warn('Could not read saved data', e);
     return { accounts: [] };
   }
-  if(!result || !result.value){
-    return { accounts: [] };
-  }
-  // We have raw stored data. Let a parse failure propagate to the caller rather
-  // than swallowing it here — boot() needs to know loading failed so it doesn't
-  // treat "couldn't read your data" the same as "you have no data."
-  const parsed = JSON.parse(result.value);
-  if(Array.isArray(parsed.accounts)) parsed.accounts.forEach(normalizeAccount);
-  return parsed;
 }
 let saveInFlight = null;
 let dataReady = false; // only true once we've completed a trustworthy load — gates all saves
 async function saveState(){
   if(!dataReady){
-    // Refuse to write until we're confident `state` reflects a real load (or a verified
-    // first run). Writing here could overwrite existing saved data with an incomplete copy.
     setSaveStatus('error');
     return;
   }
   try{
-    const result = await window.storage.set(STORAGE_KEY, JSON.stringify(state), false);
-    if(!result){
-      // window.storage.set can fail by returning null/undefined instead of throwing —
-      // this is the case that silently loses data if we don't check for it explicitly.
-      setSaveStatus('error');
-      return;
-    }
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
     setSaveStatus('saved');
   }catch(e){
+    // Most commonly: private/incognito mode, or the browser's storage quota was hit.
     console.warn('Could not save data', e);
     setSaveStatus('error');
   }
-}
-function showStorageWarning(message){
-  const el = document.getElementById('storage-warning');
-  if(!el) return;
-  el.innerHTML = `${icon('warning')} ${message}`;
-  el.classList.remove('hidden');
-}
-function hideStorageWarning(){
-  const el = document.getElementById('storage-warning');
-  if(!el) return;
-  el.classList.add('hidden');
 }
 function setSaveStatus(status){
   const el = document.getElementById('save-status');
   if(!el) return;
   if(status === 'saving'){ el.textContent = 'Saving…'; el.style.color = 'var(--ink-faint)'; }
-  else if(status === 'saved'){
-    el.textContent = 'Saved'; el.style.color = 'var(--good)';
-    hideStorageWarning();
-  }
-  else {
-    el.textContent = 'Could not save — check connection'; el.style.color = 'var(--risk)';
-    showStorageWarning('Your changes are NOT being saved. Publish this artifact (top right of the artifact panel) to enable saving, then reload this page.');
-  }
+  else if(status === 'saved'){ el.textContent = 'Saved'; el.style.color = 'var(--good)'; }
+  else { el.textContent = 'Could not save — check browser storage'; el.style.color = 'var(--risk)'; }
 }
 function persist(){
   setSaveStatus('saving');
@@ -1804,10 +1761,10 @@ async function verifyStorageWorks(){
   const testKey = '__storage_check__';
   const testValue = String(Date.now());
   try{
-    const setResult = await window.storage.set(testKey, testValue, false);
-    if(!setResult) return false;
-    const getResult = await window.storage.get(testKey, false);
-    return !!(getResult && getResult.value === testValue);
+    localStorage.setItem(testKey, testValue);
+    const ok = localStorage.getItem(testKey) === testValue;
+    localStorage.removeItem(testKey);
+    return ok;
   }catch(e){
     return false;
   }
@@ -1819,13 +1776,14 @@ async function boot(){
 
   const storageOK = await verifyStorageWorks();
   if(!storageOK){
-    // Storage itself isn't reachable right now. Do NOT attempt to load or save —
-    // an empty in-memory state must never be written over data that may still be
-    // sitting in storage but is temporarily unreachable.
+    // Storage itself isn't reachable right now (commonly private/incognito mode, or
+    // storage disabled in this browser). Do NOT attempt to load or save — an empty
+    // in-memory state must never be written over data that may still be sitting in
+    // storage but is temporarily unreachable.
     state = { accounts: [] };
     dataReady = false;
     render();
-    showStorageWarning('Saving is not currently working, so editing has been disabled to protect your existing data. Publish this artifact (top right of the artifact panel), then reload this page.');
+    console.warn('Storage is not available in this browser context — editing is disabled to protect existing data.');
     return;
   }
 
@@ -1833,13 +1791,10 @@ async function boot(){
     state = await loadState();
     dataReady = true; // storage is confirmed working AND the load succeeded — safe to save now
   }catch(e){
-    // Storage was just verified as working, so a failure here is unexpected (e.g. corrupted
-    // data). Don't assume the account list is empty — block saves until you reload.
     console.warn('Unexpected error loading saved accounts — not treating this as "no data"', e);
     state = { accounts: [] };
     dataReady = false;
     render();
-    showStorageWarning('Something went wrong loading your saved accounts, so editing has been disabled to protect your existing data. Please reload this page. If this keeps happening, use Export/Import from a device where the data still loads.');
     return;
   }
   render();
