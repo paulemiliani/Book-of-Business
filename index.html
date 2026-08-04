@@ -4,7 +4,6 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Book of Business</title>
-<link rel="icon" type="image/png" href="logo.png">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Literata:wght@500;600;700&family=Inter:wght@400;500;600;700&family=IBM+Plex+Mono:wght@500;600&display=swap" rel="stylesheet">
@@ -222,6 +221,12 @@
   .badge-dropped{background:var(--dropped-bg);color:var(--dropped);}
 
   .card-meta{font-size:12.5px;color:var(--ink-soft);display:flex;flex-direction:column;gap:3px;}
+  .meta-row{padding:1px 0;}
+  .meta-row-warn{
+    background:#FFF3C4;color:#7A5D00;
+    padding:3px 6px;margin:1px -6px;border-radius:5px;
+  }
+  .meta-row-warn b{color:#7A5D00;}
   .card-meta span b{color:var(--ink);font-weight:600;font-family:var(--font-mono);}
   .card-footer{
     display:flex;justify-content:space-between;align-items:center;
@@ -366,6 +371,14 @@
   .link-row-display a:hover{text-decoration:underline;}
   .link-row-actions{display:flex;gap:6px;flex-shrink:0;}
   .icon-btn-sm{width:26px;height:26px;}
+  .product-card{border:1px solid var(--line);border-radius:8px;padding:14px 16px;}
+  .product-card .panel-title{margin-bottom:12px;}
+  .phase-box-row{display:flex;flex-wrap:wrap;gap:14px;align-items:flex-start;}
+  .phase-box{border:1px solid var(--line);border-radius:8px;padding:14px 16px;background:var(--surface);}
+  .phase-box.is-full{flex:1 1 100%;}
+  .phase-box.is-compact{flex:1 1 calc(33.333% - 10px);min-width:190px;}
+  .stat-line.stacked{flex-direction:column;align-items:flex-start;gap:2px;}
+  .stat-line.stacked .v{font-size:11px;color:var(--ink-faint);font-weight:500;}
   .icon-btn{
     width:32px;height:32px;border-radius:7px;border:1px solid var(--line);
     background:var(--surface);color:var(--ink-faint);display:flex;align-items:center;justify-content:center;
@@ -435,8 +448,6 @@
    Data model + persistence
 --------------------------------------------------------- */
 const STORAGE_KEY = 'book-of-business-state';
-const PHASES = ['Pilot','Rollout','Expansion','Commercial'];
-const ALL_PHASES = ['Pilot','Rollout','Expansion','Commercial','Dropped'];
 const PRODUCTS = ['Clinical Assist','Daily Dashboard','Insights','Voice Notes','Voice Perio','Ambient Intelligence','Clean Claims','Auto Verify','Recall'];
 const SEGMENTS = [
   {key:'Enterprise', label:'Enterprise', range:'76+'},
@@ -446,34 +457,49 @@ const SEGMENTS = [
 ];
 const DAYS = ['Mon','Tue','Wed','Thu','Fri'];
 
-// GITHUB / SELF-HOSTED VERSION — uses the browser's own localStorage instead of
-// Claude's window.storage, since window.storage only exists inside Claude's artifact
-// environment. Data here lives in THIS browser, on THIS device, for THIS domain —
-// it does not sync with any Claude-hosted copy of this dashboard.
+// Data lives in Claude's built-in artifact storage (personal, not shared),
+// so it persists across sessions without needing an external host.
+// NOTE: this only treats a failed read as "no key yet" — it does not swallow
+// JSON parse errors on existing data, since that would risk mistaking corrupted-but-present
+// data for an empty account list (see boot(), which gates saving on a trustworthy load).
 async function loadState(){
+  let result;
   try{
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if(!raw) return { accounts: [] };
-    const parsed = JSON.parse(raw);
-    if(Array.isArray(parsed.accounts)) parsed.accounts.forEach(normalizeAccount);
-    return parsed;
+    result = await window.storage.get(STORAGE_KEY, false);
   }catch(e){
-    console.warn('Could not read saved data', e);
+    // Non-existent keys throw on this API — this is the expected path for a
+    // brand-new install that has never saved anything yet.
     return { accounts: [] };
   }
+  if(!result || !result.value){
+    return { accounts: [] };
+  }
+  // We have raw stored data. Let a parse failure propagate to the caller rather
+  // than swallowing it here — boot() needs to know loading failed so it doesn't
+  // treat "couldn't read your data" the same as "you have no data."
+  const parsed = JSON.parse(result.value);
+  if(Array.isArray(parsed.accounts)) parsed.accounts.forEach(normalizeAccount);
+  return parsed;
 }
 let saveInFlight = null;
 let dataReady = false; // only true once we've completed a trustworthy load — gates all saves
 async function saveState(){
   if(!dataReady){
+    // Refuse to write until we're confident `state` reflects a real load (or a verified
+    // first run). Writing here could overwrite existing saved data with an incomplete copy.
     setSaveStatus('error');
     return;
   }
   try{
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+    const result = await window.storage.set(STORAGE_KEY, JSON.stringify(state), false);
+    if(!result){
+      // window.storage.set can fail by returning null/undefined instead of throwing —
+      // this is the case that silently loses data if we don't check for it explicitly.
+      setSaveStatus('error');
+      return;
+    }
     setSaveStatus('saved');
   }catch(e){
-    // Most commonly: private/incognito mode, or the browser's storage quota was hit.
     console.warn('Could not save data', e);
     setSaveStatus('error');
   }
@@ -498,8 +524,8 @@ function setSaveStatus(status){
     hideStorageWarning();
   }
   else {
-    el.textContent = 'Could not save — check browser storage'; el.style.color = 'var(--risk)';
-    showStorageWarning('Your changes are NOT being saved. This usually means private/incognito browsing, or this browser\'s storage is full or disabled. Export your data as a backup and try a normal browser window.');
+    el.textContent = 'Could not save — check connection'; el.style.color = 'var(--risk)';
+    showStorageWarning('Your changes are NOT being saved. Publish this artifact (top right of the artifact panel) to enable saving, then reload this page.');
   }
 }
 function persist(){
@@ -518,23 +544,25 @@ function newAccount(name){
   return {
     id: uid(),
     name: name || 'New Account',
-    phase: 'Pilot',
     health: 'good',
     experience: 'Standalone',
     pms: [{name:'', practices:0}],
     imaging: [{name:'', practices:0}],
     livePractices: 0,
     contractedPractices: 0,
-    productMix: [],
+    productGroups: [], // [{id, products:[names], phase, live, contracted, startDate, endDate, groupNames}]
     segment: 'SMB',
     cadence: {day:'Mon', time:'', frequency:'Bi-weekly'},
-    pilot: {startDate:'', endDate:'', groupCount:0, groupNames:[]},
     currentUpdate: '',
     actionItems: [],
     links: [],
     team: {CSM:'', AM:'', IE:'', OS:'', AE:''},
     createdAt: Date.now()
   };
+}
+
+function defaultGroupFields(){
+  return {live:0, contracted:0, startDate:'', endDate:'', groupNames:[], dateDropped:'', reason:''};
 }
 
 // Fills in fields that may be missing on accounts saved by an earlier version of the app.
@@ -546,16 +574,67 @@ function normalizeAccount(acc){
   acc.links.forEach(l => { if(typeof l.id !== 'string') l.id = uid(); });
   if(!acc.team || typeof acc.team !== 'object') acc.team = {CSM:'', AM:'', IE:'', OS:'', AE:''};
   ['CSM','AM','IE','OS','AE'].forEach(role => { if(typeof acc.team[role] !== 'string') acc.team[role] = ''; });
-  if(!acc.pilot) acc.pilot = {startDate:'', endDate:'', groupCount:0, groupNames:[]};
-  // Migrate the old free-text "group" field into groupNames if present.
-  if(typeof acc.pilot.group === 'string' && acc.pilot.group.trim() && !Array.isArray(acc.pilot.groupNames)){
-    acc.pilot.groupNames = [acc.pilot.group.trim()];
-  }
-  if(typeof acc.pilot.groupCount !== 'number') acc.pilot.groupCount = 0;
-  if(!Array.isArray(acc.pilot.groupNames)) acc.pilot.groupNames = [];
-  delete acc.pilot.group;
   if(!acc.cadence) acc.cadence = {day:'Mon', time:'', frequency:'Bi-weekly'};
-  if(!Array.isArray(acc.productMix)) acc.productMix = [];
+
+  // Migrate the previous per-product / fixed-phase-box structure into user-defined groups,
+  // consolidating numbers rather than discarding them.
+  if(!Array.isArray(acc.productGroups)){
+    acc.productGroups = [];
+    if(acc.productDetails && typeof acc.productDetails === 'object' && Array.isArray(acc.productMix)){
+      const byPhase = {};
+      acc.productMix.forEach(p => {
+        const d = acc.productDetails[p];
+        if(!d) return;
+        const ph = (d.phase === 'Pilot' || d.phase === 'Rollout' || d.phase === 'Commercial') ? d.phase : 'Pilot';
+        if(!byPhase[ph]) byPhase[ph] = {products:[], live:0, contracted:0};
+        byPhase[ph].products.push(p);
+        byPhase[ph].live += Number(d.live)||0;
+        byPhase[ph].contracted += Number(d.contracted)||0;
+      });
+      Object.keys(byPhase).forEach(ph => {
+        const g = byPhase[ph];
+        acc.productGroups.push({
+          id: uid(),
+          products: g.products,
+          phase: ph,
+          live: g.live,
+          contracted: g.contracted,
+          startDate: (ph === 'Pilot' && acc.pilotGroup) ? (acc.pilotGroup.startDate||'') : '',
+          endDate: (ph === 'Pilot' && acc.pilotGroup) ? (acc.pilotGroup.endDate||'') : '',
+          groupNames: (ph === 'Pilot' && acc.pilotGroup && Array.isArray(acc.pilotGroup.groupNames)) ? acc.pilotGroup.groupNames : []
+        });
+      });
+    }
+    delete acc.productMix;
+    delete acc.productDetails;
+    delete acc.pilotGroup;
+    delete acc.pilot;
+    delete acc.phase;
+  }
+  acc.productGroups.forEach(g => {
+    if(typeof g.id !== 'string') g.id = uid();
+    if(!Array.isArray(g.products)) g.products = [];
+    if(g.phase !== 'Pilot' && g.phase !== 'Rollout' && g.phase !== 'Commercial' && g.phase !== 'Dropped') g.phase = 'Pilot';
+    if(typeof g.live !== 'number') g.live = Number(g.live)||0;
+    if(typeof g.contracted !== 'number') g.contracted = Number(g.contracted)||0;
+    if(typeof g.startDate !== 'string') g.startDate = '';
+    if(typeof g.endDate !== 'string') g.endDate = '';
+    if(!Array.isArray(g.groupNames)) g.groupNames = [];
+    if(typeof g.dateDropped !== 'string') g.dateDropped = '';
+    if(typeof g.reason !== 'string') g.reason = '';
+  });
+  // A product should only ever belong to one group — if data got duplicated somehow, keep
+  // its first occurrence only, so nothing renders in two places at once.
+  const seen = new Set();
+  acc.productGroups.forEach(g => {
+    g.products = g.products.filter(p => {
+      if(seen.has(p)) return false;
+      seen.add(p);
+      return true;
+    });
+  });
+  acc.productGroups = acc.productGroups.filter(g => g.products.length > 0);
+
   if(typeof acc.currentUpdate !== 'string') acc.currentUpdate = '';
   return acc;
 }
@@ -566,19 +645,64 @@ function normalizeAccount(acc){
 // Tracks which display/edit-toggle sections are forced into edit mode this session.
 // Not persisted — resets naturally on reload. Key: `${accountId}:${sectionKey}`.
 let editState = {};
+// Whether the "add products" checklist is currently open, per account (session-only, resets on reload).
+let addProductsOpen = {};
+function assignedProducts(a){
+  return a.productGroups.flatMap(g => g.products);
+}
+function remainingProducts(a){
+  const assigned = assignedProducts(a);
+  return PRODUCTS.filter(p => !assigned.includes(p));
+}
+function groupHasData(g){
+  if(g.phase === 'Pilot'){
+    return !!(g.startDate || g.endDate || (g.live||0) > 0 || (g.contracted||0) > 0 || (g.groupNames||[]).some(n=>n.trim()));
+  }
+  if(g.phase === 'Dropped'){
+    return !!(g.dateDropped || g.reason.trim());
+  }
+  return (g.live||0) > 0 || (g.contracted||0) > 0;
+}
 function sectionHasData(a, key){
+  if(key.indexOf('group:') === 0){
+    const g = a.productGroups.find(gr => gr.id === key.slice(6));
+    return g ? groupHasData(g) : false;
+  }
   switch(key){
-    case 'pilot': return !!(a.pilot.startDate || a.pilot.endDate || a.pilot.groupCount > 0 || (a.pilot.groupNames||[]).some(n=>n.trim()));
-    case 'pms': return a.pms.some(p=>p.name.trim());
-    case 'imaging': return a.imaging.some(p=>p.name.trim());
     case 'cadence': return !!a.cadence.time;
+    case 'accountDetails': return a.pms.some(p=>p.name.trim()) && a.imaging.some(p=>p.name.trim());
     default: return false;
   }
 }
+// Customer Phase is no longer set manually — it's computed from each product's group's phase.
+function computeCustomerPhase(a){
+  const assigned = assignedProducts(a);
+  if(assigned.length === 0) return 'Pilot';
+  const phaseByProduct = {};
+  a.productGroups.forEach(g => g.products.forEach(p => { phaseByProduct[p] = g.phase; }));
+  const allPhases = assigned.map(p => phaseByProduct[p] || 'Pilot');
+  if(allPhases.every(ph => ph === 'Dropped')) return 'Dropped';
+  const phases = allPhases.filter(ph => ph !== 'Dropped');
+  if(phases.length === 0) return 'Dropped';
+  const allPilot = phases.every(ph => ph === 'Pilot');
+  const allCommercial = phases.every(ph => ph === 'Commercial');
+  const hasCommercial = phases.some(ph => ph === 'Commercial');
+  const hasPilot = phases.some(ph => ph === 'Pilot');
+  const hasRollout = phases.some(ph => ph === 'Rollout');
+  if(allPilot) return 'Pilot';
+  if(allCommercial) return 'Commercial';
+  if(hasCommercial && hasPilot) return 'Expansion Pilot';
+  if(hasRollout) return 'Rollout';
+  return 'Pilot';
+}
 function isSectionEditing(accountId, key, hasData){
   const stateKey = `${accountId}:${key}`;
-  if(stateKey in editState) return editState[stateKey];
-  return !hasData;
+  // Establish the initial mode once (edit if empty, display if already filled), then stick
+  // with it across re-renders. Without this, any section with a completion event that fires
+  // mid-edit (e.g. a checkbox's change event, which fires per-click with no "blur" pause)
+  // would flip back to display the instant the first item was selected/typed.
+  if(!(stateKey in editState)) editState[stateKey] = !hasData;
+  return editState[stateKey];
 }
 function toggleSectionEdit(accountId, key, hasData){
   const stateKey = `${accountId}:${key}`;
@@ -611,7 +735,7 @@ function fmtDate(d){
 }
 function badgeClass(phase){
   return {
-    'Pilot':'badge-pilot','Rollout':'badge-rollout','Expansion':'badge-expansion',
+    'Pilot':'badge-pilot','Rollout':'badge-rollout','Expansion Pilot':'badge-expansion',
     'Commercial':'badge-commercial','Dropped':'badge-dropped'
   }[phase] || 'badge-pilot';
 }
@@ -702,10 +826,18 @@ function renderOverview(){
 
   const counts = {good:0, mod:0, risk:0};
   accounts.forEach(a => { if(counts[a.health] !== undefined) counts[a.health]++; });
-  const livePractices = accounts.reduce((s,a)=>s + (Number(a.livePractices)||0), 0);
+  const totalPilots = accounts.filter(a => {
+    const cp = computeCustomerPhase(a);
+    return cp === 'Pilot' || cp === 'Expansion Pilot';
+  }).length;
 
-  const filters = ['All', ...PHASES, 'Dropped'];
-  let filtered = accounts.filter(a => activeFilter === 'All' || a.phase === activeFilter);
+  const filters = ['All', 'Pilot', 'Rollout', 'Commercial', 'Dropped'];
+  let filtered = accounts.filter(a => {
+    if(activeFilter === 'All') return true;
+    const cp = computeCustomerPhase(a);
+    if(activeFilter === 'Pilot') return cp === 'Pilot' || cp === 'Expansion Pilot';
+    return cp === activeFilter;
+  });
   if(searchQuery.trim()){
     const q = searchQuery.trim().toLowerCase();
     filtered = filtered.filter(a => a.name.toLowerCase().includes(q));
@@ -719,7 +851,7 @@ function renderOverview(){
           <div class="summary-card good"><span class="num">${counts.good}</span><span class="label">Healthy</span></div>
           <div class="summary-card mod"><span class="num">${counts.mod}</span><span class="label">Moderate</span></div>
           <div class="summary-card risk"><span class="num">${counts.risk}</span><span class="label">At risk</span></div>
-          <div class="summary-card"><span class="num">${livePractices}</span><span class="label">Live practices</span></div>
+          <div class="summary-card"><span class="num">${totalPilots}</span><span class="label">Total Pilots</span></div>
         </div>
 
         <div class="overview-toolbar">
@@ -795,25 +927,32 @@ function renderOpenActionItems(accounts){
 }
 
 function renderAccountCard(a){
-  const pmsLabel = (a.pms && a.pms.length) ? a.pms.map(p=>p.name).filter(Boolean).join(' / ') || 'PMS not set' : 'PMS not set';
-  const imagingLabel = (a.imaging && a.imaging.length) ? a.imaging.map(p=>p.name).filter(Boolean).join(' / ') || 'Not set' : 'Not set';
+  const computedPhase = computeCustomerPhase(a);
+  const assigned = assignedProducts(a);
   return `
     <div class="account-card" data-id="${a.id}">
       <div class="account-card-top">
         <div>
-          <span class="badge ${badgeClass(a.phase)}">${a.phase}</span>
+          <span class="badge ${badgeClass(computedPhase)}">${computedPhase}</span>
           <div class="account-name" style="margin-top:6px;">${escapeHtml(a.name)}</div>
         </div>
         <div class="health-dot ${a.health}" title="${healthLabel(a.health)}"></div>
       </div>
       <div class="card-meta">
         <span>Segment: <b>${a.segment}</b></span>
-        <span>PMS: <b style="font-family:inherit;font-weight:600;">${escapeHtml(pmsLabel)}</b></span>
-        <span>Imaging Software: <b style="font-family:inherit;font-weight:600;">${escapeHtml(imagingLabel)}</b></span>
-        <span>Live / Contracted: <b>${a.livePractices||0} / ${a.contractedPractices||0}</b></span>
+        <span>Products Active: <b>${assigned.length}</b></span>
+        ${a.productGroups.length === 0 ? `<span style="color:var(--ink-faint);">No products selected</span>` : a.productGroups.map(g => {
+          if(g.phase === 'Dropped'){
+            return `<span class="meta-row">${g.products.map(escapeHtml).join(' + ')} (Dropped)</span>`;
+          }
+          // Pilots are naturally live < contracted early on — only Commercial products
+          // being behind is actually worth flagging.
+          const underDelivering = g.phase === 'Commercial' && (g.live||0) < (g.contracted||0);
+          return `<span class="meta-row ${underDelivering ? 'meta-row-warn' : ''}" title="${underDelivering ? 'Behind its contracted count' : ''}">${g.products.map(escapeHtml).join(' + ')} (${g.phase}): <b>${g.live||0} / ${g.contracted||0}</b></span>`;
+        }).join('')}
       </div>
       <div class="card-footer">
-        <span>${a.productMix.length} product${a.productMix.length===1?'':'s'} active</span>
+        <span>${assigned.length} product${assigned.length===1?'':'s'} active</span>
         <span>${healthLabel(a.health)}</span>
       </div>
     </div>
@@ -908,12 +1047,6 @@ function openNewAccountModal(){
           <label class="field-label">Account name</label>
           <input type="text" id="new-account-name" class="text-input" placeholder="e.g. Riverside Dental Group" autofocus>
         </div>
-        <div class="field-row">
-          <label class="field-label">Customer phase</label>
-          <select class="text-input" id="new-account-phase">
-            ${ALL_PHASES.map(p => `<option value="${p}" ${p==='Pilot'?'selected':''}>${p}</option>`).join('')}
-          </select>
-        </div>
         <div class="modal-actions">
           <button class="btn btn-ghost" id="cancel-new">Cancel</button>
           <button class="btn btn-primary" id="confirm-new">Create account</button>
@@ -922,13 +1055,11 @@ function openNewAccountModal(){
     </div>
   `;
   const input = document.getElementById('new-account-name');
-  const phaseSelect = document.getElementById('new-account-phase');
   const close = () => root.innerHTML = '';
   document.getElementById('modal-overlay').onclick = (e) => { if(e.target.id==='modal-overlay') close(); };
   document.getElementById('cancel-new').onclick = close;
   document.getElementById('confirm-new').onclick = () => {
     const acc = newAccount(input.value.trim() || 'New Account');
-    acc.phase = phaseSelect.value;
     state.accounts.unshift(acc);
     persist();
     close();
@@ -969,7 +1100,213 @@ function renderDetail(){
   const view = document.getElementById('detail-view');
   if(!a){ backToOverview(); return; }
 
-  const term = daysBetween(a.pilot.startDate, a.pilot.endDate);
+  const computedPhase = computeCustomerPhase(a);
+  const accountDetailsHasData = sectionHasData(a, 'accountDetails');
+  const accountDetailsEditing = isSectionEditing(a.id, 'accountDetails', accountDetailsHasData);
+
+  // Account Details is built once, then placed in the main column while being edited,
+  // or in the sidebar (right under At a Glance) once filled in and collapsed to display.
+  const accountDetailsHtml = `
+        <div class="panel">
+          <div class="panel-title">
+            <span>Account Details</span>
+            <button class="section-edit-btn" data-section="accountDetails" title="${accountDetailsEditing?'Done':'Edit'}">${accountDetailsEditing ? icon('check') : icon('edit')}</button>
+          </div>
+          ${accountDetailsEditing ? `
+          <div class="field-row">
+            <label class="field-label">Experience</label>
+            <div class="pill-group">
+              ${['Standalone','Embedded','Mix'].map(x => `<button class="pill ${a.experience===x?'selected':''}" data-experience="${x}">${x}</button>`).join('')}
+            </div>
+          </div>
+          <div class="field-row" style="margin-top:14px;">
+            <label class="field-label">PMS</label>
+            <div id="pms-rows">
+              ${a.pms.map((p,i) => `
+                <div class="pms-row" data-idx="${i}">
+                  <input type="text" class="text-input pms-name" placeholder="PMS name" value="${escapeHtml(p.name)}">
+                  <input type="number" min="0" class="text-input pms-practices" placeholder="# practices" value="${p.practices||0}">
+                  <button class="icon-btn pms-remove" title="Remove">${icon('trash')}</button>
+                </div>
+              `).join('')}
+            </div>
+            <button class="btn btn-ghost btn-sm" id="btn-add-pms" style="margin-top:4px;">${icon('plus')} Add PMS</button>
+          </div>
+          <div class="field-row" style="margin-top:14px;">
+            <label class="field-label">Imaging Software</label>
+            <div id="imaging-rows">
+              ${a.imaging.map((p,i) => `
+                <div class="imaging-row" data-idx="${i}">
+                  <input type="text" class="text-input imaging-name" placeholder="Imaging software name" value="${escapeHtml(p.name)}">
+                  <input type="number" min="0" class="text-input imaging-practices" placeholder="# practices" value="${p.practices||0}">
+                  <button class="icon-btn imaging-remove" title="Remove">${icon('trash')}</button>
+                </div>
+              `).join('')}
+            </div>
+            <button class="btn btn-ghost btn-sm" id="btn-add-imaging" style="margin-top:4px;">${icon('plus')} Add Imaging Software</button>
+          </div>
+          ` : `
+          <div class="stat-line"><span>Experience</span><span class="v">${a.experience}</span></div>
+          ${a.pms.filter(p=>p.name.trim()).map(p => `<div class="stat-line"><span>${escapeHtml(p.name)}</span><span class="v">${p.practices||0} practices</span></div>`).join('')}
+          ${a.imaging.filter(p=>p.name.trim()).map(p => `<div class="stat-line"><span>${escapeHtml(p.name)}</span><span class="v">${p.practices||0} practices</span></div>`).join('')}
+          `}
+        </div>`;
+
+  // Product Mix: pick products first, group them together, then set one phase (and its
+  // fields) for the whole group. Finished groups are laid out under Pilot / Rollout /
+  // Commercial / Dropped headings. The "add products" checklist stays collapsed behind a
+  // button until explicitly opened, so it never crowds the page once groups exist.
+  const remaining = remainingProducts(a);
+  const addOpen = !!addProductsOpen[a.id];
+
+  function renderGroupCard(g){
+    const gKey = `group:${g.id}`;
+    const editing = isSectionEditing(a.id, gKey, groupHasData(g));
+    const term = daysBetween(g.startDate, g.endDate);
+    const groupNames = (g.groupNames||[]).filter(n=>n.trim());
+    const sizeClass = editing ? 'is-full' : 'is-compact';
+    const liveLabel = g.phase === 'Pilot' ? 'Number of Practices' : 'Live Practices';
+
+    return `
+      <div class="phase-box ${sizeClass}" data-group-id="${g.id}">
+        <div class="panel-title">
+          <span>${g.products.map(escapeHtml).join(' + ')}</span>
+          <div style="display:flex;gap:6px;">
+            <button class="section-edit-btn" data-section="${gKey}" title="${editing?'Done':'Edit'}">${editing ? icon('check') : icon('edit')}</button>
+            <button class="icon-btn remove-group-btn" data-group-id="${g.id}" title="Ungroup / remove">${icon('trash')}</button>
+          </div>
+        </div>
+        ${editing ? `
+        <div class="field-row">
+          <label class="field-label">Phase</label>
+          <div class="pill-group">
+            <button class="pill ${g.phase==='Pilot'?'selected':''}" data-group-phase="${g.id}" data-phase-value="Pilot">Pilot</button>
+            <button class="pill ${g.phase==='Rollout'?'selected':''}" data-group-phase="${g.id}" data-phase-value="Rollout">Rollout</button>
+            <button class="pill ${g.phase==='Commercial'?'selected':''}" data-group-phase="${g.id}" data-phase-value="Commercial">Commercial</button>
+            <button class="pill phase-dropped ${g.phase==='Dropped'?'selected':''}" data-group-phase="${g.id}" data-phase-value="Dropped">Dropped</button>
+          </div>
+        </div>
+        ${g.phase === 'Pilot' ? `
+        <div class="two-col" style="margin-top:14px;">
+          <div class="field-row">
+            <label class="field-label">Start Date</label>
+            <input type="date" class="text-input" data-group-field="${g.id}:startDate" value="${g.startDate||''}">
+          </div>
+          <div class="field-row">
+            <label class="field-label">End Date</label>
+            <input type="date" class="text-input" data-group-field="${g.id}:endDate" value="${g.endDate||''}">
+          </div>
+        </div>
+        <div class="field-row">
+          <label class="field-label">Term</label>
+          <div>${term !== null ? `<span class="pilot-term-badge">${term} day${term===1?'':'s'}</span>` : `<span style="color:var(--ink-faint);font-size:13px;">Set both dates to calculate</span>`}</div>
+        </div>
+        <div class="field-row">
+          <label class="field-label">Number of Practices</label>
+          <input type="number" min="0" class="text-input" data-group-field="${g.id}:live" value="${g.live||0}">
+        </div>
+        <div class="field-row">
+          <label class="field-label">Practice Names (optional)</label>
+          <div class="group-names-list" data-group-id="${g.id}">
+            ${g.groupNames.map((n,i) => `
+              <div class="group-name-row" data-idx="${i}">
+                <input type="text" class="text-input group-practice-name" placeholder="Practice name" value="${escapeHtml(n)}">
+                <button class="icon-btn group-practice-name-remove" title="Remove">${icon('trash')}</button>
+              </div>
+            `).join('')}
+          </div>
+          <button class="btn btn-ghost btn-sm add-group-practice-name" data-group-id="${g.id}" style="margin-top:4px;">${icon('plus')} Add Practice Name</button>
+        </div>
+        <div class="field-row">
+          <label class="field-label">Contracted Practices</label>
+          <input type="number" min="0" class="text-input" data-group-field="${g.id}:contracted" value="${g.contracted||0}">
+        </div>
+        ` : g.phase === 'Dropped' ? `
+        <div class="field-row" style="margin-top:14px;">
+          <label class="field-label">Date Dropped</label>
+          <input type="date" class="text-input" data-group-field="${g.id}:dateDropped" value="${g.dateDropped||''}">
+        </div>
+        <div class="field-row">
+          <label class="field-label">Reasoning</label>
+          <textarea class="text-input" data-group-field="${g.id}:reason" placeholder="Why was this dropped?">${escapeHtml(g.reason)}</textarea>
+        </div>
+        ` : `
+        <div class="two-col" style="margin-top:14px;">
+          <div class="field-row">
+            <label class="field-label">Live Practices</label>
+            <input type="number" min="0" class="text-input" data-group-field="${g.id}:live" value="${g.live||0}">
+          </div>
+          <div class="field-row">
+            <label class="field-label">Contracted Practices</label>
+            <input type="number" min="0" class="text-input" data-group-field="${g.id}:contracted" value="${g.contracted||0}">
+          </div>
+        </div>
+        `}
+        ` : `
+        <div class="stat-line"><span>Phase</span><span class="v">${g.phase}</span></div>
+        ${g.phase === 'Pilot' ? `
+        <div class="stat-line"><span>Start Date</span><span class="v">${fmtDate(g.startDate)}</span></div>
+        <div class="stat-line"><span>End Date</span><span class="v">${fmtDate(g.endDate)}</span></div>
+        <div class="stat-line"><span>Term</span><span class="v">${term !== null ? term+' day'+(term===1?'':'s') : '—'}</span></div>
+        <div class="stat-line"><span>${liveLabel}</span><span class="v">${g.live||0}</span></div>
+        ${groupNames.length ? `<div class="stat-line wrap"><span>Practice Names</span><span class="v">${groupNames.map(escapeHtml).join(', ')}</span></div>` : ''}
+        <div class="stat-line"><span>Contracted Practices</span><span class="v">${g.contracted||0}</span></div>
+        ` : g.phase === 'Dropped' ? `
+        <div class="stat-line"><span>Date Dropped</span><span class="v">${fmtDate(g.dateDropped)}</span></div>
+        ${g.reason.trim() ? `<div class="stat-line wrap"><span>Reasoning</span><span class="v">${escapeHtml(g.reason)}</span></div>` : ''}
+        ` : `
+        <div class="stat-line"><span>Live Practices</span><span class="v">${g.live||0}</span></div>
+        <div class="stat-line"><span>Contracted Practices</span><span class="v">${g.contracted||0}</span></div>
+        `}
+        `}
+      </div>`;
+  }
+
+  const phaseSections = ['Pilot','Rollout','Commercial','Dropped'].map(phase => {
+    const groupsInPhase = a.productGroups.filter(g => g.phase === phase);
+    if(groupsInPhase.length === 0) return '';
+    return `
+      <div style="margin-top:16px;">
+        <div style="font-weight:600;font-size:12.5px;color:var(--ink-soft);text-transform:uppercase;letter-spacing:.03em;margin-bottom:8px;">${phase}</div>
+        <div class="phase-box-row">
+          ${groupsInPhase.map(renderGroupCard).join('')}
+        </div>
+      </div>`;
+  }).join('');
+
+  const addProductsBlock = remaining.length === 0 ? '' : (
+    addOpen ? `
+      <div class="field-row" style="margin-top:${a.productGroups.length?'16px':'0'};">
+        <label class="field-label">Products</label>
+        <div class="product-grid">
+          ${remaining.map(p => `
+            <label class="product-check">
+              <input type="checkbox" data-remaining-product="${p}">
+              ${p}
+            </label>
+          `).join('')}
+        </div>
+        <div style="display:flex;gap:8px;margin-top:10px;">
+          <button class="btn btn-primary btn-sm" id="btn-group-selected">${icon('plus')} Add Selected Products</button>
+          <button class="btn btn-ghost btn-sm" id="btn-cancel-add-products">Cancel</button>
+        </div>
+      </div>
+    ` : `
+      <button class="btn btn-primary btn-sm" id="btn-toggle-add-products" style="margin-top:${a.productGroups.length?'16px':'0'};">${icon('plus')} ${a.productGroups.length ? 'Add More Products' : 'Add Products'}</button>
+    `
+  );
+
+  const productMixHtml = `
+        <div class="panel">
+          <div class="panel-title"><span>Product Mix</span></div>
+          ${a.productGroups.length > 0 ? `
+          ${phaseSections}
+          ${remaining.length === 0 ? '' : addProductsBlock}
+          ` : `
+          ${a.productGroups.length === 0 && remaining.length === 0 ? '' : addProductsBlock}
+          ${phaseSections}
+          `}
+        </div>`;
 
   view.innerHTML = `
     <button class="btn btn-ghost btn-sm" id="btn-back" style="margin-bottom:14px;">${icon('back')} All accounts</button>
@@ -978,7 +1315,7 @@ function renderDetail(){
       <div class="detail-title">
         <input type="text" id="acc-name" value="${escapeHtml(a.name)}">
         <div class="detail-sub">
-          <span class="badge ${badgeClass(a.phase)}">${a.phase}</span>
+          <span class="badge ${badgeClass(computedPhase)}">${computedPhase}</span>
           <span>·</span>
           <span>Segment: <b>${a.segment}</b></span>
           <span>·</span>
@@ -993,13 +1330,6 @@ function renderDetail(){
     <div class="detail-grid">
       <!-- LEFT: sticky summary -->
       <div class="sticky">
-        <div class="panel">
-          <div class="panel-title">Customer Phase</div>
-          <select class="text-input" id="acc-phase">
-            ${ALL_PHASES.map(p => `<option value="${p}" ${a.phase===p?'selected':''}>${p}</option>`).join('')}
-          </select>
-        </div>
-
         <div class="panel">
           <div class="panel-title">Account Health</div>
           <div class="pill-group">
@@ -1018,11 +1348,12 @@ function renderDetail(){
 
         <div class="panel">
           <div class="panel-title">At a Glance</div>
-          <div class="stat-line"><span>Live practices</span><span class="v">${a.livePractices||0}</span></div>
-          <div class="stat-line"><span>Contracted practices</span><span class="v">${a.contractedPractices||0}</span></div>
-          <div class="stat-line"><span>Products active</span><span class="v">${a.productMix.length} / ${PRODUCTS.length}</span></div>
-          <div class="stat-line"><span>Open action items</span><span class="v">${a.actionItems.filter(i=>!i.done).length}</span></div>
+          <div class="stat-line"><span>Products Active</span><span class="v">${assignedProducts(a).length}</span></div>
+          ${a.productGroups.map(g => `<div class="stat-line stacked"><span>${g.products.map(escapeHtml).join(' + ')}</span><span class="v">${g.phase === 'Dropped' ? 'Dropped' : `${g.live||0} live / ${g.contracted||0} contracted`}</span></div>`).join('')}
+          <div class="stat-line"><span>Open Action Items</span><span class="v">${a.actionItems.filter(i=>!i.done).length}</span></div>
         </div>
+
+        ${!accountDetailsEditing ? accountDetailsHtml : ''}
 
         <div class="panel">
           <div class="panel-title">Important Links</div>
@@ -1065,139 +1396,9 @@ function renderDetail(){
 
       <!-- RIGHT: details -->
       <div>
-        ${a.phase === 'Pilot' ? (() => {
-          const pilotEditing = isSectionEditing(a.id, 'pilot', sectionHasData(a, 'pilot'));
-          const groupNames = (a.pilot.groupNames||[]).filter(n=>n.trim());
-          return `
-        <div class="panel">
-          <div class="panel-title">
-            <span>Pilot Terms</span>
-            <button class="section-edit-btn" data-section="pilot" title="${pilotEditing?'Done':'Edit'}">${pilotEditing ? icon('check') : icon('edit')}</button>
-          </div>
-          ${pilotEditing ? `
-          <div class="two-col">
-            <div class="field-row">
-              <label class="field-label">Start date</label>
-              <input type="date" class="text-input" id="pilot-start" value="${a.pilot.startDate||''}">
-            </div>
-            <div class="field-row">
-              <label class="field-label">End date</label>
-              <input type="date" class="text-input" id="pilot-end" value="${a.pilot.endDate||''}">
-            </div>
-          </div>
-          <div class="field-row">
-            <label class="field-label">Term</label>
-            <div>${term !== null ? `<span class="pilot-term-badge">${term} day${term===1?'':'s'}</span>` : `<span style="color:var(--ink-faint);font-size:13px;">Set both dates to calculate</span>`}</div>
-          </div>
-          <div class="field-row">
-            <label class="field-label">Number of Practices</label>
-            <input type="number" min="0" class="text-input" id="pilot-group-count" value="${a.pilot.groupCount||0}">
-          </div>
-          <div class="field-row">
-            <label class="field-label">Practice Names (optional)</label>
-            <div id="pilot-group-names">
-              ${a.pilot.groupNames.map((n,i) => `
-                <div class="group-name-row" data-idx="${i}">
-                  <input type="text" class="text-input group-name" placeholder="Practice name" value="${escapeHtml(n)}">
-                  <button class="icon-btn group-name-remove" title="Remove">${icon('trash')}</button>
-                </div>
-              `).join('')}
-            </div>
-            <button class="btn btn-ghost btn-sm" id="btn-add-group-name" style="margin-top:4px;">${icon('plus')} Add Practice Name</button>
-          </div>
-          ` : `
-          <div class="stat-line"><span>Start Date</span><span class="v">${fmtDate(a.pilot.startDate)}</span></div>
-          <div class="stat-line"><span>End Date</span><span class="v">${fmtDate(a.pilot.endDate)}</span></div>
-          <div class="stat-line"><span>Term</span><span class="v">${term !== null ? term+' day'+(term===1?'':'s') : '—'}</span></div>
-          <div class="stat-line"><span>Number of Practices</span><span class="v">${a.pilot.groupCount||0}</span></div>
-          ${groupNames.length ? `<div class="stat-line wrap"><span>Practice Names</span><span class="v">${groupNames.map(escapeHtml).join(', ')}</span></div>` : ''}
-          `}
-        </div>`;
-        })() : ''}
+        ${productMixHtml}
 
-        <div class="panel">
-          <div class="panel-title">Account Details</div>
-
-          <div class="field-row">
-            <label class="field-label">Experience</label>
-            <div class="pill-group">
-              ${['Standalone','Embedded','Mix'].map(x => `<button class="pill ${a.experience===x?'selected':''}" data-experience="${x}">${x}</button>`).join('')}
-            </div>
-          </div>
-
-          ${(() => {
-            const pmsEditing = isSectionEditing(a.id, 'pms', sectionHasData(a, 'pms'));
-            return `
-          <div class="field-row">
-            <div class="field-label" style="display:flex;align-items:center;justify-content:space-between;">
-              <span>PMS</span>
-              <button class="section-edit-btn" data-section="pms" title="${pmsEditing?'Done':'Edit'}">${pmsEditing ? icon('check') : icon('edit')}</button>
-            </div>
-            ${pmsEditing ? `
-            <div id="pms-rows">
-              ${a.pms.map((p,i) => `
-                <div class="pms-row" data-idx="${i}">
-                  <input type="text" class="text-input pms-name" placeholder="PMS name" value="${escapeHtml(p.name)}">
-                  <input type="number" min="0" class="text-input pms-practices" placeholder="# practices" value="${p.practices||0}">
-                  <button class="icon-btn pms-remove" title="Remove">${icon('trash')}</button>
-                </div>
-              `).join('')}
-            </div>
-            <button class="btn btn-ghost btn-sm" id="btn-add-pms" style="margin-top:4px;">${icon('plus')} Add PMS</button>
-            ` : a.pms.filter(p=>p.name.trim()).map(p => `
-              <div class="stat-line"><span>${escapeHtml(p.name)}</span><span class="v">${p.practices||0} practices</span></div>
-            `).join('')}
-          </div>`;
-          })()}
-
-          ${(() => {
-            const imagingEditing = isSectionEditing(a.id, 'imaging', sectionHasData(a, 'imaging'));
-            return `
-          <div class="field-row" style="margin-top:14px;">
-            <div class="field-label" style="display:flex;align-items:center;justify-content:space-between;">
-              <span>Imaging Software</span>
-              <button class="section-edit-btn" data-section="imaging" title="${imagingEditing?'Done':'Edit'}">${imagingEditing ? icon('check') : icon('edit')}</button>
-            </div>
-            ${imagingEditing ? `
-            <div id="imaging-rows">
-              ${a.imaging.map((p,i) => `
-                <div class="imaging-row" data-idx="${i}">
-                  <input type="text" class="text-input imaging-name" placeholder="Imaging software name" value="${escapeHtml(p.name)}">
-                  <input type="number" min="0" class="text-input imaging-practices" placeholder="# practices" value="${p.practices||0}">
-                  <button class="icon-btn imaging-remove" title="Remove">${icon('trash')}</button>
-                </div>
-              `).join('')}
-            </div>
-            <button class="btn btn-ghost btn-sm" id="btn-add-imaging" style="margin-top:4px;">${icon('plus')} Add Imaging Software</button>
-            ` : a.imaging.filter(p=>p.name.trim()).map(p => `
-              <div class="stat-line"><span>${escapeHtml(p.name)}</span><span class="v">${p.practices||0} practices</span></div>
-            `).join('')}
-          </div>`;
-          })()}
-
-          <div class="two-col" style="margin-top:14px;">
-            <div class="field-row">
-              <label class="field-label">Live practices</label>
-              <input type="number" min="0" class="text-input" id="live-practices" value="${a.livePractices||0}">
-            </div>
-            <div class="field-row">
-              <label class="field-label">Contracted practices</label>
-              <input type="number" min="0" class="text-input" id="contracted-practices" value="${a.contractedPractices||0}">
-            </div>
-          </div>
-        </div>
-
-        <div class="panel">
-          <div class="panel-title">Product Mix</div>
-          <div class="product-grid">
-            ${PRODUCTS.map(p => `
-              <label class="product-check ${a.productMix.includes(p)?'on':''}">
-                <input type="checkbox" data-product="${p}" ${a.productMix.includes(p)?'checked':''}>
-                ${p}
-              </label>
-            `).join('')}
-          </div>
-        </div>
+        ${accountDetailsEditing ? accountDetailsHtml : ''}
 
         ${(() => {
           const cadenceEditing = isSectionEditing(a.id, 'cadence', sectionHasData(a, 'cadence'));
@@ -1273,10 +1474,8 @@ function renderDetail(){
     </div>
   `;
 
-  bindDetailEvents(a, term);
+  bindDetailEvents(a);
 }
-
-let rteSaveTimer = null;
 
 function bindRichTextEditor(a){
   const editor = document.getElementById('current-update');
@@ -1399,9 +1598,6 @@ function bindDetailEvents(a){
 
   document.getElementById('acc-name').onchange = (e) => updateAccount(acc => acc.name = e.target.value.trim() || 'Untitled account');
 
-  // Customer phase (dropdown)
-  document.getElementById('acc-phase').onchange = (e) => updateAccount(acc => { acc.phase = e.target.value; });
-
   // Health
   document.querySelectorAll('[data-health]').forEach(btn => {
     btn.onclick = () => updateAccount(acc => acc.health = btn.dataset.health);
@@ -1415,7 +1611,7 @@ function bindDetailEvents(a){
     btn.onclick = () => updateAccount(acc => acc.experience = btn.dataset.experience);
   });
 
-  // Section edit/done toggles (Pilot Terms, PMS, Imaging Software, Meeting Cadence)
+  // Section edit/done toggles (Account Details, each product group, Meeting Cadence, links)
   document.querySelectorAll('.section-edit-btn').forEach(btn => {
     btn.onclick = () => {
       const section = btn.dataset.section;
@@ -1424,22 +1620,7 @@ function bindDetailEvents(a){
     };
   });
 
-  // Pilot fields (only present while the Pilot Terms section is in edit mode)
-  const startEl = document.getElementById('pilot-start');
-  const endEl = document.getElementById('pilot-end');
-  const groupCountEl = document.getElementById('pilot-group-count');
-  if(startEl) startEl.onchange = (e) => updateAccount(acc => acc.pilot.startDate = e.target.value);
-  if(endEl) endEl.onchange = (e) => updateAccount(acc => acc.pilot.endDate = e.target.value);
-  if(groupCountEl) groupCountEl.onchange = (e) => updateAccount(acc => acc.pilot.groupCount = Number(e.target.value)||0);
-  const btnAddGroupName = document.getElementById('btn-add-group-name');
-  if(btnAddGroupName) btnAddGroupName.onclick = () => updateAccount(acc => acc.pilot.groupNames.push(''));
-  document.querySelectorAll('.group-name-row').forEach(row => {
-    const idx = Number(row.dataset.idx);
-    row.querySelector('.group-name').onchange = (e) => updateAccount(acc => acc.pilot.groupNames[idx] = e.target.value);
-    row.querySelector('.group-name-remove').onclick = () => updateAccount(acc => acc.pilot.groupNames.splice(idx,1));
-  });
-
-  // PMS rows (only present while that section is in edit mode)
+  // Account Details: PMS rows (only present while that section is in edit mode)
   const btnAddPms = document.getElementById('btn-add-pms');
   if(btnAddPms) btnAddPms.onclick = () => updateAccount(acc => acc.pms.push({name:'', practices:0}));
   document.querySelectorAll('.pms-row').forEach(row => {
@@ -1449,6 +1630,7 @@ function bindDetailEvents(a){
     row.querySelector('.pms-remove').onclick = () => updateAccount(acc => acc.pms.splice(idx,1));
   });
 
+  // Account Details: Imaging Software rows
   const btnAddImaging = document.getElementById('btn-add-imaging');
   if(btnAddImaging) btnAddImaging.onclick = () => updateAccount(acc => acc.imaging.push({name:'', practices:0}));
   document.querySelectorAll('.imaging-row').forEach(row => {
@@ -1489,15 +1671,87 @@ function bindDetailEvents(a){
     row.querySelector('.team-name').onchange = (e) => updateAccount(acc => acc.team[role] = e.target.value);
   });
 
-  document.getElementById('live-practices').onchange = (e) => updateAccount(acc => acc.livePractices = Number(e.target.value)||0);
-  document.getElementById('contracted-practices').onchange = (e) => updateAccount(acc => acc.contractedPractices = Number(e.target.value)||0);
+  // Product Mix: toggle the "add products" checklist open/closed
+  const btnToggleAddProducts = document.getElementById('btn-toggle-add-products');
+  if(btnToggleAddProducts){
+    btnToggleAddProducts.onclick = () => {
+      addProductsOpen[a.id] = true;
+      renderDetail();
+    };
+  }
+  const btnCancelAddProducts = document.getElementById('btn-cancel-add-products');
+  if(btnCancelAddProducts){
+    btnCancelAddProducts.onclick = () => {
+      addProductsOpen[a.id] = false;
+      renderDetail();
+    };
+  }
 
-  // Product mix
-  document.querySelectorAll('[data-product]').forEach(cb => {
-    cb.onchange = () => updateAccount(acc => {
-      const p = cb.dataset.product;
-      if(cb.checked){ if(!acc.productMix.includes(p)) acc.productMix.push(p); }
-      else { acc.productMix = acc.productMix.filter(x => x !== p); }
+  // Product Mix: select some remaining products, then group them together
+  const btnGroupSelected = document.getElementById('btn-group-selected');
+  if(btnGroupSelected){
+    btnGroupSelected.onclick = () => {
+      const checked = Array.from(document.querySelectorAll('[data-remaining-product]:checked')).map(cb => cb.dataset.remainingProduct);
+      if(checked.length === 0) return;
+      addProductsOpen[a.id] = false;
+      updateAccount(acc => {
+        const newGroup = { id: uid(), products: checked, phase: 'Pilot', ...defaultGroupFields() };
+        acc.productGroups.push(newGroup);
+      });
+    };
+  }
+
+  // Product Mix: remove/ungroup a group entirely (its products return to the unassigned pool)
+  document.querySelectorAll('.remove-group-btn').forEach(btn => {
+    const groupId = btn.dataset.groupId;
+    btn.onclick = () => updateAccount(acc => {
+      acc.productGroups = acc.productGroups.filter(g => g.id !== groupId);
+    });
+  });
+
+  // Product Mix: phase pill per group
+  document.querySelectorAll('[data-group-phase]').forEach(btn => {
+    const groupId = btn.dataset.groupPhase;
+    btn.onclick = () => updateAccount(acc => {
+      const g = acc.productGroups.find(gr => gr.id === groupId);
+      if(g) g.phase = btn.dataset.phaseValue;
+    });
+  });
+
+  // Product Mix: group fields (dates, live, contracted, dropped info) — encoded as "groupId:fieldName"
+  document.querySelectorAll('[data-group-field]').forEach(el => {
+    const [groupId, field] = el.dataset.groupField.split(':');
+    el.onchange = (e) => updateAccount(acc => {
+      const g = acc.productGroups.find(gr => gr.id === groupId);
+      if(!g) return;
+      if(field === 'startDate' || field === 'endDate' || field === 'dateDropped' || field === 'reason'){
+        g[field] = e.target.value;
+      } else {
+        g[field] = Number(e.target.value)||0;
+      }
+    });
+  });
+
+  // Product Mix: optional practice names per group (Pilot only)
+  document.querySelectorAll('.add-group-practice-name').forEach(btn => {
+    const groupId = btn.dataset.groupId;
+    btn.onclick = () => updateAccount(acc => {
+      const g = acc.productGroups.find(gr => gr.id === groupId);
+      if(g) g.groupNames.push('');
+    });
+  });
+  document.querySelectorAll('.group-names-list').forEach(container => {
+    const groupId = container.dataset.groupId;
+    container.querySelectorAll('.group-name-row').forEach(row => {
+      const idx = Number(row.dataset.idx);
+      row.querySelector('.group-practice-name').onchange = (e) => updateAccount(acc => {
+        const g = acc.productGroups.find(gr => gr.id === groupId);
+        if(g) g.groupNames[idx] = e.target.value;
+      });
+      row.querySelector('.group-practice-name-remove').onclick = () => updateAccount(acc => {
+        const g = acc.productGroups.find(gr => gr.id === groupId);
+        if(g) g.groupNames.splice(idx,1);
+      });
     });
   });
 
@@ -1550,10 +1804,10 @@ async function verifyStorageWorks(){
   const testKey = '__storage_check__';
   const testValue = String(Date.now());
   try{
-    localStorage.setItem(testKey, testValue);
-    const ok = localStorage.getItem(testKey) === testValue;
-    localStorage.removeItem(testKey);
-    return ok;
+    const setResult = await window.storage.set(testKey, testValue, false);
+    if(!setResult) return false;
+    const getResult = await window.storage.get(testKey, false);
+    return !!(getResult && getResult.value === testValue);
   }catch(e){
     return false;
   }
@@ -1571,7 +1825,7 @@ async function boot(){
     state = { accounts: [] };
     dataReady = false;
     render();
-    showStorageWarning('Saving is not currently working, so editing has been disabled to protect your existing data. This is usually private/incognito browsing, or storage disabled in this browser.');
+    showStorageWarning('Saving is not currently working, so editing has been disabled to protect your existing data. Publish this artifact (top right of the artifact panel), then reload this page.');
     return;
   }
 
