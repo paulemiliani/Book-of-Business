@@ -633,6 +633,9 @@ function sectionHasData(a, key){
   }
 }
 // Customer Phase is no longer set manually — it's computed from each product's group's phase.
+// Order reflects "maturity" — used both to build compound labels (most mature first)
+// and to pick a single badge color for accounts with more than one active phase.
+const PHASE_ORDER = ['Commercial', 'Rollout', 'Pilot'];
 function computeCustomerPhase(a){
   const assigned = assignedProducts(a);
   if(assigned.length === 0) return 'Pilot';
@@ -642,16 +645,8 @@ function computeCustomerPhase(a){
   if(allPhases.every(ph => ph === 'Dropped')) return 'Dropped';
   const phases = allPhases.filter(ph => ph !== 'Dropped');
   if(phases.length === 0) return 'Dropped';
-  const allPilot = phases.every(ph => ph === 'Pilot');
-  const allCommercial = phases.every(ph => ph === 'Commercial');
-  const hasCommercial = phases.some(ph => ph === 'Commercial');
-  const hasPilot = phases.some(ph => ph === 'Pilot');
-  const hasRollout = phases.some(ph => ph === 'Rollout');
-  if(allPilot) return 'Pilot';
-  if(allCommercial) return 'Commercial';
-  if(hasCommercial && hasPilot) return 'Expansion Pilot';
-  if(hasRollout) return 'Rollout';
-  return 'Pilot';
+  const distinct = PHASE_ORDER.filter(p => phases.includes(p));
+  return distinct.join(' + ');
 }
 function isSectionEditing(accountId, key, hasData){
   const stateKey = `${accountId}:${key}`;
@@ -688,14 +683,18 @@ function daysBetween(a,b){
 }
 function fmtDate(d){
   if(!d) return '—';
-  const dt = new Date(d);
+  // Parse Y-M-D as LOCAL date components — new Date('YYYY-MM-DD') parses as UTC midnight,
+  // which rolls back a day once toLocaleDateString converts it to any timezone behind UTC.
+  const parts = String(d).split('-');
+  if(parts.length !== 3) return '—';
+  const dt = new Date(Number(parts[0]), Number(parts[1]) - 1, Number(parts[2]));
   return dt.toLocaleDateString(undefined,{month:'short',day:'numeric',year:'numeric'});
 }
 function badgeClass(phase){
-  return {
-    'Pilot':'badge-pilot','Rollout':'badge-rollout','Expansion Pilot':'badge-expansion',
-    'Commercial':'badge-commercial','Dropped':'badge-dropped'
-  }[phase] || 'badge-pilot';
+  if(phase === 'Dropped') return 'badge-dropped';
+  if(phase.indexOf('Commercial') !== -1) return 'badge-commercial';
+  if(phase.indexOf('Rollout') !== -1) return 'badge-rollout';
+  return 'badge-pilot';
 }
 function healthLabel(h){ return {good:'Healthy', mod:'Moderate', risk:'At Risk'}[h] || 'Not Set'; }
 
@@ -784,17 +783,12 @@ function renderOverview(){
 
   const counts = {good:0, mod:0, risk:0};
   accounts.forEach(a => { if(counts[a.health] !== undefined) counts[a.health]++; });
-  const totalPilots = accounts.filter(a => {
-    const cp = computeCustomerPhase(a);
-    return cp === 'Pilot' || cp === 'Expansion Pilot';
-  }).length;
+  const totalPilots = accounts.filter(a => computeCustomerPhase(a).split(' + ').includes('Pilot')).length;
 
   const filters = ['All', 'Pilot', 'Rollout', 'Commercial', 'Dropped'];
   let filtered = accounts.filter(a => {
     if(activeFilter === 'All') return true;
-    const cp = computeCustomerPhase(a);
-    if(activeFilter === 'Pilot') return cp === 'Pilot' || cp === 'Expansion Pilot';
-    return cp === activeFilter;
+    return computeCustomerPhase(a).split(' + ').includes(activeFilter);
   });
   if(searchQuery.trim()){
     const q = searchQuery.trim().toLowerCase();
@@ -1047,6 +1041,11 @@ function getAccount(){ return state.accounts.find(a => a.id === currentAccountId
 function updateAccount(mutator){
   const acc = getAccount();
   if(!acc) return;
+  // Flush whatever's currently in the Current Update editor first — this update is about
+  // to trigger a full re-render, which would otherwise rebuild that editor from whatever
+  // was last actually saved, silently discarding anything typed there in the last ~400ms.
+  const rteEditor = document.getElementById('current-update');
+  if(rteEditor) acc.currentUpdate = rteEditor.innerHTML;
   mutator(acc);
   persist();
   renderDetail();
